@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ronin’s Revenge: Mastery</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@900&display=swap');
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #000; }
+        canvas { display: block; width: 100%; height: 100%; }
+        
+        #ui-layer {
+            position: fixed; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; z-index: 100;
+            background: #000; transition: opacity 2s ease;
+        }
+        
+        .kanji-title { 
+            font-family: 'Noto Serif JP', serif; 
+            font-size: 8rem; color: #cc0000; 
+            filter: drop-shadow(0 0 20px #cc0000);
+            animation: pulse 4s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.8; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.05); }
+        }
+
+        .btn-start {
+            border: 1px solid #444; color: #888;
+            padding: 10px 40px; margin-top: 20px;
+            letter-spacing: 0.8em; text-transform: uppercase;
+            transition: all 0.5s; cursor: pointer;
+        }
+
+        .btn-start:hover {
+            border-color: #cc0000; color: #cc0000;
+            background: rgba(204, 0, 0, 0.1);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="kanji-title">復讐</div>
+        <div class="btn-start" onclick="initGame()">Enter The Storm</div>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const RED = '#cc0000';
+        const BLACK = '#000000';
+        const GRAY = '#1a1a1a';
+
+        let width, height, lastTime, startTime;
+        let isRunning = false;
+        let audioCtx;
+
+        const state = {
+            distance: 0,
+            intensity: 0,
+            groundY: 0,
+            enemies: [],
+            particles: [],
+            swordTrails: [],
+            player: {
+                x: 150, y: 0, 
+                vx: 0, vy: 0,
+                rotation: 0,
+                frame: 0,
+                move: 'idle',
+                moveTimer: 0,
+                isGrounded: true,
+                style: 0 // 0: Slash, 1: Spin, 2: Blink
+            }
+        };
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            state.groundY = height * 0.8;
+            if (state.player.isGrounded) state.player.y = state.groundY;
+        }
+
+        function createAudio() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            
+            // Deep low drone
+            const osc = audioCtx.createOscillator();
+            const g = audioCtx.createGain();
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(45, audioCtx.currentTime);
+            const filter = audioCtx.createBiquadFilter();
+            filter.frequency.value = 120;
+            g.gain.value = 0.08;
+            osc.connect(filter);
+            filter.connect(g);
+            g.connect(audioCtx.destination);
+            osc.start();
+
+            // Periodic "Bell" hits
+            function playBell() {
+                if(!isRunning) return;
+                const o = audioCtx.createOscillator();
+                const gn = audioCtx.createGain();
+                o.type = 'sine';
+                o.frequency.setValueAtTime(120, audioCtx.currentTime);
+                gn.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                gn.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 3);
+                o.connect(gn);
+                gn.connect(audioCtx.destination);
+                o.start(); o.stop(audioCtx.currentTime + 3);
+                setTimeout(playBell, 8000 + Math.random() * 10000);
+            }
+            playBell();
+        }
+
+        function spawnEnemy() {
+            state.enemies.push({
+                x: width + 200,
+                y: state.groundY,
+                vx: -4 - Math.random() * 6,
+                vy: 0,
+                isGrounded: true,
+                jumpTimer: Math.random() * 100,
+                hp: 1,
+                type: Math.random() > 0.8 ? 'elite' : 'grunt'
+            });
+        }
+
+        function drawStickman(x, y, color, rot, frame, moveType, moveProgress) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(rot);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
+            ctx.lineCap = 'round';
+
+            // Animation logic
+            const walk = Math.sin(frame * 0.3) * 15;
+            const headY = -60;
+
+            // Legs - dynamic based on move
+            ctx.beginPath();
+            if (moveType === 'spin') {
+                ctx.moveTo(0, -30); ctx.lineTo(25, -10);
+                ctx.moveTo(0, -30); ctx.lineTo(-25, -10);
+            } else {
+                ctx.moveTo(0, -30); ctx.lineTo(walk, 0);
+                ctx.moveTo(0, -30); ctx.lineTo(-walk, 0);
+            }
+            ctx.stroke();
+
+            // Torso
+            ctx.beginPath();
+            ctx.moveTo(0, -30); ctx.lineTo(0, headY + 5);
+            ctx.stroke();
+
+            // Head
+            ctx.beginPath();
+            ctx.arc(0, headY, 8, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Sword Action
+            ctx.beginPath();
+            ctx.strokeStyle = RED;
+            if (moveType === 'spin') {
+                const sRot = frame * 0.8;
+                ctx.moveTo(Math.cos(sRot)*10, -45 + Math.sin(sRot)*10);
+                ctx.lineTo(Math.cos(sRot)*70, -45 + Math.sin(sRot)*70);
+            } else if (moveType === 'strike') {
+                ctx.moveTo(0, -45); ctx.lineTo(60, -30);
+            } else {
+                ctx.moveTo(0, -45); ctx.lineTo(20, -10);
+            }
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        function update(time) {
+            const p = state.player;
+            p.frame++;
+            state.distance += 5;
+
+            // Player Physics & AI "Moves"
+            if (p.moveTimer > 0) {
+                p.moveTimer--;
+            } else {
+                // Decide next move
+                const r = Math.random();
+                if (r < 0.01) { // High Jump
+                    p.move = 'jump';
+                    p.vy = -25;
+                    p.isGrounded = false;
+                    p.moveTimer = 60;
+                } else if (r < 0.02) { // Spin Attack
+                    p.move = 'spin';
+                    p.moveTimer = 40;
+                    p.vy = -10;
+                    p.isGrounded = false;
+                } else if (r < 0.03) { // Blink Dash
+                    p.move = 'blink';
+                    p.x += 300;
+                    p.moveTimer = 20;
+                    createBlood(p.x - 150, p.y - 40, 30, '#fff'); // White flash
+                } else {
+                    p.move = 'run';
+                }
+            }
+
+            if (!p.isGrounded) {
+                p.vy += 1;
+                p.y += p.vy;
+                p.rotation += (p.move === 'spin' ? 0.4 : 0.1);
+                if (p.y >= state.groundY) {
+                    p.y = state.groundY;
+                    p.isGrounded = true;
+                    p.vy = 0;
+                    p.rotation = 0;
+                }
+            }
+            p.x += (150 - p.x) * 0.05; // Return to left side
+
+            // Enemy Logic
+            if (state.enemies.length < 8 && Math.random() < 0.03) spawnEnemy();
+
+            state.enemies.forEach((en, i) => {
+                en.x += en.vx;
+                
+                // Enemy Jumping AI
+                en.jumpTimer--;
+                if (en.isGrounded && en.jumpTimer < 0) {
+                    en.vy = -15 - Math.random() * 10;
+                    en.isGrounded = false;
+                    en.jumpTimer = 100 + Math.random() * 200;
+                }
+
+                if (!en.isGrounded) {
+                    en.vy += 1;
+                    en.y += en.vy;
+                    if (en.y >= state.groundY) {
+                        en.y = state.groundY;
+                        en.isGrounded = true;
+                        en.vy = 0;
+                    }
+                }
+
+                // Interaction
+                const dx = en.x - p.x;
+                const dy = en.y - p.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+
+                if (dist < 120 && (p.move === 'spin' || p.move === 'blink' || Math.random() < 0.1)) {
+                    createBlood(en.x, en.y - 40, 20, RED);
+                    state.enemies.splice(i, 1);
+                    // Add sword trail
+                    state.swordTrails.push({x: p.x, y: p.y, tx: en.x, ty: en.y, life: 1.0});
+                }
+
+                if (en.x < -200) state.enemies.splice(i, 1);
+            });
+
+            // Particles
+            state.particles.forEach((pt, i) => {
+                pt.x += pt.vx; pt.y += pt.vy; pt.vy += 0.5; pt.life -= 0.02;
+                if(pt.life <= 0) state.particles.splice(i, 1);
+            });
+
+            // Trails
+            state.swordTrails.forEach((tr, i) => {
+                tr.life -= 0.05;
+                if(tr.life <= 0) state.swordTrails.splice(i, 1);
+            });
+        }
+
+        function createBlood(x, y, count, color) {
+            for(let i=0; i<count; i++) {
+                state.particles.push({
+                    x, y, 
+                    vx: (Math.random()-0.5)*15, 
+                    vy: (Math.random()-0.8)*15, 
+                    life: 1, 
+                    color
+                });
+            }
+        }
+
+        function draw() {
+            const time = performance.now();
+            update(time);
+
+            ctx.fillStyle = BLACK;
+            ctx.fillRect(0, 0, width, height);
+
+            // Parallax Background
+            ctx.fillStyle = '#050505';
+            for(let i=0; i<10; i++) {
+                let x = (i * 400 - (state.distance * 0.5) % 4000);
+                ctx.beginPath();
+                ctx.moveTo(x, state.groundY);
+                ctx.lineTo(x+200, state.groundY - 400);
+                ctx.lineTo(x+400, state.groundY);
+                ctx.fill();
+            }
+
+            // Sword Trails
+            state.swordTrails.forEach(tr => {
+                ctx.strokeStyle = `rgba(255, 255, 255, ${tr.life})`;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(tr.x, tr.y - 40);
+                ctx.lineTo(tr.tx, tr.ty - 40);
+                ctx.stroke();
+            });
+
+            // Ground
+            ctx.strokeStyle = RED;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, state.groundY);
+            ctx.lineTo(width, state.groundY);
+            ctx.stroke();
+
+            // Draw Enemies
+            state.enemies.forEach(en => {
+                drawStickman(en.x, en.y, '#333', en.isGrounded ? 0 : Math.sin(state.player.frame*0.1), state.player.frame, 'run', 0);
+            });
+
+            // Draw Player
+            const p = state.player;
+            drawStickman(p.x, p.y, RED, p.rotation, p.frame, p.move, 0);
+
+            // Particles
+            state.particles.forEach(pt => {
+                ctx.fillStyle = pt.color;
+                ctx.globalAlpha = pt.life;
+                ctx.fillRect(pt.x, pt.y, 3, 3);
+            });
+            ctx.globalAlpha = 1;
+
+            if (isRunning) requestAnimationFrame(draw);
+        }
+
+        function initGame() {
+            document.getElementById('ui-layer').style.opacity = '0';
+            setTimeout(() => document.getElementById('ui-layer').style.display = 'none', 2000);
+            isRunning = true;
+            createAudio();
+            resize();
+            requestAnimationFrame(draw);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+    </script>
+</body>
+</html>
